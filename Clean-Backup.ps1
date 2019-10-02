@@ -6,8 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$disk = Get-Volume -FilePath (Resolve-Path $BackupPath).Path
-$sizeToBeFreed = $ReserveSpace - $disk.SizeRemaining
+$sizeToBeFreed = $ReserveSpace - (Resolve-Path $BackupPath).Drive.Free
 
 $files = @(Get-ChildItem $BackupPath) -match '_(FULL|DIFF|LOG)_\d+_\d+\.' |
 Select-Object -Property Name,FullName,Length,
