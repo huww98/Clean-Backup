@@ -7,24 +7,31 @@ param(
 $ErrorActionPreference = "Stop"
 
 $disk = Get-Volume -FilePath (Resolve-Path $BackupPath).Path
-$global:sizeToBeFreed = $ReserveSpace - $disk.SizeRemaining
+$sizeToBeFreed = $ReserveSpace - $disk.SizeRemaining
 
-$global:files = @(Get-ChildItem $BackupPath) -match '_(FULL|DIFF|LOG)_\d+_\d+\.' |
-Select-Object -Property Name,FullName,Length,@{label='BackupCreateTime'; expression={ 
-    $dateStr = [regex]::Match($_.Name, '_(\d+_\d+)\.').Groups[1]
-    [datetime]::ParseExact($dateStr, 'MMddyyyy_hhmmss', [System.Globalization.CultureInfo]::InvariantCulture)
-}} |
+$files = @(Get-ChildItem $BackupPath) -match '_(FULL|DIFF|LOG)_\d+_\d+\.' |
+Select-Object -Property Name,FullName,Length,
+    @{label='BackupCreateTime'; expression={
+        $dateStr = [regex]::Match($_.Name, '_(\d+_\d+)\.').Groups[1].Value
+        [datetime]::ParseExact($dateStr, 'MMddyyyy_hhmmss', [System.Globalization.CultureInfo]::InvariantCulture)
+    }},
+    @{label='BackupType'; expression={ [regex]::Match($_.Name, '_(FULL|DIFF|LOG)_').Groups[1].Value }} |
 Sort-Object -Property BackupCreateTime
 
-function Remove-Backup {
-    [CmdletBinding(SupportsShouldProcess=$true)]
-    param([Parameter(ValueFromPipeline=$true)]$backup)
+$files | ForEach-Object {
+    if ($_.BackupType -eq 'FULL') { $dep=$null }
+    $t = $_.BackupCreateTime
+    if ($_.BackupType -eq 'DIFF') {
+        $dep = $files | Where-Object { $_.BackupCreateTime -lt $t -and $_.BackupType -eq 'full' } | Select-Object -Last 1
+    }
+    if ($_.BackupType -eq 'LOG') {
+        $dep = $files | Where-Object { $_.BackupCreateTime -lt $t } | Select-Object -Last 1
+    }
 
-    Write-Debug "removing $($backup | Format-Table | Out-String)"
-    $global:sizeToBeFreed -= $backup.Length
-    $backup.FullName | Remove-Item
-    $global:files = $global:files | Where-Object { $_.FullName -ne $backup.FullName }
+    $_ | Add-Member -NotePropertyName "DependsOn" -NotePropertyValue $dep
 }
+
+Write-Debug "files: $($files | Format-Table -Property Name,BackupCreateTime,Length,BackupType,@{Label='DependsOn'; Expression={$_.DependsOn.Name}} | Out-String)"
 
 while ($true) {
     Write-Debug "sizeToBeFreed: $sizeToBeFreed"
@@ -32,48 +39,21 @@ while ($true) {
         break
     }
 
-    Write-Debug "files: $($files | Format-Table -Property Name,Length | Out-String)"
     if (-not $files) {
         throw 'No backup to remove'
     }
 
-    if ($files.Length -eq 1) {
-        Write-Debug "Removing last"
-        $files[0] | Remove-Backup
-        continue
+    $toBeRemoved = $null
+    $dependent = $files
+    while ($dependent) {
+        $toBeRemoved = $dependent | Select-Object -First 1
+        Write-Debug "candidate: $($toBeRemoved.Name)"
+        $dependent = $files | Where-Object { $_.DependsOn -eq $toBeRemoved }
+        Write-Debug "dependent: $($dependent.Name)"
     }
 
-    $log = @($files | Where-Object { $_.Name -match '_LOG_' })
-    $diff = @($files | Where-Object { $_.Name -match '_DIFF_' })
-    $full = @($files | Where-Object { $_.Name -match '_FULL_' })
-
-    if (($files[0] -ne $full[0])) {
-        Write-Debug "Ensure oldest is full backup"
-        $files[0] | Remove-Backup
-        continue
-    }
-
-    $oldDiff = $diff | Where-Object { $_.BackupCreateTime -lt $full[1].BackupCreateTime } # diffs depend on oldest full
-    $oldLog = $log | Where-Object { $_.BackupCreateTime -lt $full[1].BackupCreateTime } # logs depend on oldest full
-    if (-not $oldDiff -and -not $oldLog) {
-        Write-Debug "Remove oldest full"
-        $full[0] | Remove-Backup
-        continue
-    }
-
-    $oldLog = $log | Where-Object { -not ( $_.BackupCreateTime -gt $diff[0].BackupCreateTime ) }
-    if ($oldLog) {
-        Write-Debug "Remove logs which only depend on oldest full"
-        $oldLog | Select-Object -Last 1 | Remove-Backup
-        continue
-    }
-
-    $oldLog = $log | Where-Object { $_.BackupCreateTime -lt $diff[1].BackupCreateTime -and $_.BackupCreateTime -lt $full[1].BackupCreateTime }
-    if ($oldLog) {
-        Write-Debug "Remove logs which depend on oldest diff"
-        $oldLog | Select-Object -Last 1 | Remove-Backup
-    } else {
-        Write-Debug "Remove oldest diff"
-        $diff[0] | Remove-Backup
-    }
+    Write-Debug "removing $($toBeRemoved.Name)"
+    $sizeToBeFreed -= $toBeRemoved.Length
+    $files = $files | Where-Object { $_ -ne $toBeRemoved }
+    $toBeRemoved.FullName | Remove-Item
 }
