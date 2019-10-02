@@ -30,7 +30,10 @@ $files | ForEach-Object {
     $_ | Add-Member -NotePropertyName "DependsOn" -NotePropertyValue $dep
 }
 
-Write-Debug "files: $($files | Format-Table -Property Name,BackupCreateTime,Length,BackupType,@{Label='DependsOn'; Expression={$_.DependsOn.Name}} | Out-String)"
+$filesDesc = $files | Format-Table -Property Name,BackupCreateTime,Length,BackupType,@{Label='DependsOn'; Expression={$_.DependsOn.Name}} | Out-String
+Write-Debug "files: $filesDesc"
+Write-EventLog -LogName Application -Source CleanBackup -EntryType Information -EventId 1001 `
+    -Message "Clean backup job started. All backup files: $filesDesc. Size to be freed: $sizeToBeFreed"
 
 while ($true) {
     Write-Debug "sizeToBeFreed: $sizeToBeFreed"
@@ -52,6 +55,8 @@ while ($true) {
     }
 
     Write-Debug "removing $($toBeRemoved.Name)"
+    Write-EventLog -LogName Application -Source CleanBackup -EntryType Information -EventId 1002 `
+        -Message "Removing backup file $($toBeRemoved.FullName), will free $($toBeRemoved.Length) bytes"
     $sizeToBeFreed -= $toBeRemoved.Length
     $files = $files | Where-Object { $_ -ne $toBeRemoved }
     $toBeRemoved.FullName | Remove-Item
